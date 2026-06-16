@@ -4,7 +4,7 @@
 
 Pure Swift, zero runtime dependencies. GlyphScan understands *how CJK OCR actually fails* — because it has looked at the glyphs.
 
-> **Status: design stage.** This repository currently holds the architecture / design spec in [docs/DESIGN.md](docs/DESIGN.md). Implementation is in progress.
+> **Status: early implementation.** `GlyphScanCore` — the recall-anchored two-stage matcher with a pluggable scorer and candidate source — is implemented and tested (`swift test`, 15 passing). The glyph-confusion model and learned scorer ([DESIGN.md](docs/DESIGN.md) §8–9) are next.
 
 ---
 
@@ -60,6 +60,36 @@ The glyph-confusion table is the shared hub:
 ```
 
 Full details, data model, and the training pipeline are in [docs/DESIGN.md](docs/DESIGN.md).
+
+## Quick start
+
+```swift
+import GlyphScanCore
+
+let corpus = [
+    SimpleRecord(id: 1, stem: "光合作用的主要场所是叶绿体", options: ["线粒体", "叶绿体", "细胞核"]),
+    // … your records (any type conforming to MatchableRecord)
+]
+
+let matcher = GlyphScanMatcher(source: ArrayCandidateSource(corpus))
+
+// Feed it a noisy OCR dump — even a whole page with the record buried inside:
+let hits = matcher.bestMatches(for: ocrText)
+if let top = hits.first {
+    print(top.record.id, top.score, top.confidence)   // e.g. 1  0.92  .high
+}
+```
+
+Bring your own OCR (Apple Vision or anything that yields text), and for large
+corpora back `CandidateSource` with a SQLite `LIKE` query instead of the
+in-memory `ArrayCandidateSource`.
+
+## Build & test
+
+```sh
+swift build
+swift test
+```
 
 ## Design principles
 
