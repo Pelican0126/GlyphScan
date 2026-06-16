@@ -1,60 +1,62 @@
-# GlyphScan — 设计文档
+# GlyphScan — Design Document
+
+**English** | [中文](DESIGN.zh-CN.md)
 
 | | |
 |---|---|
-| 状态 | Draft（设计阶段） |
-| 日期 | 2026-06-16 |
-| 作者 | Pelican0126 + Claude |
+| Status | Draft (design stage) |
+| Date | 2026-06-16 |
+| Authors | Pelican0126 + Claude |
 
 ---
 
-## 1. 一句话定位
+## 1. In one sentence
 
-> **GlyphScan** —— 端侧、相机 OCR、大海捞针式的**短记录模糊匹配引擎**：给一帧充满噪声的 OCR 文本和一个短记录语料库，实时找出相机正对着的是哪条记录，并给出一个**可信的概率**。纯 Swift、零运行时依赖，匹配核心**理解中文 OCR 到底怎么错的**——因为它真的盯着字形看过。
+> **GlyphScan** — an on-device, camera-OCR, needle-in-a-haystack **short-record fuzzy matcher**: given a frame of noisy OCR text and a corpus of short records, find in real time which record the camera is pointed at, and return a *trustworthy probability*. Pure Swift, zero runtime dependencies, with a matching core that **understands how Chinese OCR actually fails** — because it has looked at the glyphs.
 
-这不是 OCR 库（OCR 谁都能调 Vision）。难的、值得做的是后半段：一页几百个字里把正确那条记录的分顶上去、对真机 OCR 噪声鲁棒、还能给出校准过的置信度——而且这套"噪声感"是从字形里**自动学出来的**，不是手列规则。
+This is not an OCR library (anyone can call Vision). The hard, worthwhile part is the second half: pushing the correct record's score to the top inside a page of hundreds of characters, staying robust to real-device OCR noise, and emitting a calibrated confidence — with that "sense of noise" **learned automatically from the glyphs**, not hand-listed as rules.
 
-## 2. 背景与动机
+## 2. Background and motivation
 
-相机 OCR 短记录匹配是个被低估的难问题：把手机对准印刷页跑 OCR，吐回来的是几百个字的 blob——页眉页脚、好几条记录的文本混在一起、平均每 10 个字错 1 个。要在本地语料里**实时、端侧**地定位出用户究竟对着哪一条，并告诉他该信几分。
+Camera-OCR short-record matching is an underrated hard problem. Point a phone at a printed page and run OCR, and you get back a blob of a few hundred characters — headers, footers, several records' worth of text mixed together, and roughly one misread character in ten. You must locate, in real time and on-device, which single record in the local corpus the user is pointing at, and tell them how much to trust it.
 
-朴素方案的三处痛点：
+Three pain points of the naive approach:
 
-1. **相似度崩塌**：Jaccard / 编辑距离在这个 regime 直接失效——噪声撑爆集合并集，正确记录逐字命中却被稀释到 ~0.2 分；一个认错的 CJK 字把最长连续匹配拦腰砍断。
-2. **手调魔数**：相似度权重、字段加权、置信度切点、罚分全靠拍脑袋，没有数据支撑，也无法随语料自适应。
-3. **对头号失效束手无策**：真机 OCR 约每 10 个 CJK 字错 1 个，而朴素相似度对所有认错的字一视同仁——一个被认错的形近字（未→末）会把真命中从 0.7 拖到 0.4。
+1. **Similarity collapse**: Jaccard / edit distance fail outright in this regime — noise blows up the set union, a verbatim-present record is diluted to ~0.2, and one misread CJK character cuts the longest common run in half.
+2. **Hand-tuned magic numbers**: similarity weights, field weighting, confidence cutoffs, and penalties are all guesswork — no data backing, no adaptation to the corpus.
+3. **Helpless against the #1 failure mode**: real-device OCR misreads ~1 CJK char in 10, yet naive similarity treats every misread equally — one mistaken look-alike (未→末) drags a true hit from 0.7 down to 0.4.
 
-GlyphScan 用两个设计正面回应：
+GlyphScan answers these head-on with two designs:
 
-- **字形混淆驱动的 OCR 感知相似度**（§7、§8）：把"OCR 怎么错"变成主角。
-- **学习型标定打分器**（§9）：用一个小逻辑回归取代全部手调魔数，输出真概率。
+- **Glyph-confusion-driven OCR-aware similarity** (§7, §8): make "how OCR fails" the protagonist.
+- **A learned, calibrated scorer** (§9): replace all the hand-tuned magic numbers with a small logistic regression that emits a real probability.
 
-## 3. 目标与非目标
+## 3. Goals and non-goals
 
-### 目标
-- 匹配核心为独立 SwiftPM 包，**仅依赖 Foundation**（运行时核心）。
-- 通过 `CandidateSource` 协议与具体存储（SQLite 等）解耦，留一道唯一可替换缝。
-- 以通用 `Record` 为中心，让引擎适用于卡片 / 题库 / 发票行项 / 药品 / 菜单 / 笔记检索等场景。
-- 引入字形混淆表，统一驱动**相似度打分、合成噪声、置信度标定**三处。
-- 引入学习型标定打分器，取代手调权重与置信度切点，输出校准概率。
-- 合成数据自举 + 纯 Swift 训练/评测 CLI，**任何人拿自己语料都能复现**、开箱即用。
+### Goals
+- The matching core is a standalone SwiftPM package, **depending only on Foundation** (runtime core).
+- Decoupled from concrete storage (SQLite, etc.) via the `CandidateSource` protocol — one and only one pluggable seam.
+- Centered on a generic `Record`, so the engine works for flashcards / quiz banks / invoice line items / medications / menus / note retrieval, etc.
+- A glyph-confusion table that uniformly drives **similarity scoring, synthetic noise, and confidence calibration**.
+- A learned, calibrated scorer that replaces hand-tuned weights and confidence cutoffs and emits a calibrated probability.
+- Synthetic-data bootstrap + a pure-Swift training/eval CLI, so **anyone can reproduce it on their own corpus** and it works out of the box.
 
-### 非目标（YAGNI）
-- ❌ 不打包 OCR 引擎。BYO-OCR；只提供一个可选、极薄的 Vision 适配 target。
-- ❌ 不含相机 / UI。
-- ❌ 流式跨帧追踪状态机本期**不做**（作为未来可选模块 `GlyphScanStream`）。
-- ❌ 不上 GBT / 神经网络排序器（本期就逻辑回归）。
-- ❌ 无在线学习 / bandit（端侧反馈本期只做"采集钩子"，离线重训；在线自适应留作未来）。
-- ❌ 无服务器、无云训练。
+### Non-goals (YAGNI)
+- ❌ No bundled OCR engine. BYO-OCR; only an optional, ultra-thin Vision adapter target.
+- ❌ No camera / UI.
+- ❌ Streaming cross-frame tracking is **out of scope** this round (a future optional module `GlyphScanStream`).
+- ❌ No GBT / neural-net ranker (logistic regression only this round).
+- ❌ No online learning / bandit (on-device feedback is a "collection hook" only this round, retrained offline; online adaptation is future work).
+- ❌ No server, no cloud training.
 
-## 4. 核心定位：通用记录匹配基元
+## 4. Positioning: a general record-matching primitive
 
-引擎以通用 `Record` 为中心，不绑任何具体领域：
+The engine is centered on a generic `Record`, bound to no specific domain:
 
 ```swift
-public typealias RecordID = Int64                 // 由消费方定义，库不关心其含义
+public typealias RecordID = Int64                 // consumer-defined; the library never interprets it
 
-public enum FieldRole { case primary, secondary } // 字段角色：主字段权重高，次字段次之
+public enum FieldRole { case primary, secondary } // primary fields weigh more, secondary less
 
 public struct MatchField {
     public let text: String
@@ -63,284 +65,285 @@ public struct MatchField {
 
 public protocol MatchableRecord {
     var id: RecordID { get }
-    var fields: [MatchField] { get }               // 一条记录的可检索字段
+    var fields: [MatchField] { get }               // a record's searchable fields
 }
 ```
 
-- 字段按 primary/secondary 加权（默认 0.4/0.6，可配，最终交给学习器）。
-- 切分单元（按编号标记把一帧切成多条单元）、字段角色标注等**领域特异逻辑降级成"可插拔策略"**（§6 `Segmenter` 协议）；通用核心默认"整帧即一条单元"。
-- 消费方写一个 `YourType: MatchableRecord` 适配即可接入（主字段→primary，次字段→secondary）。
+- Fields are weighted by primary/secondary (default 0.4/0.6, configurable, ultimately handed to the learner).
+- Unit segmentation (splitting a frame into multiple units by numbering markers) and field-role labeling are **domain-specific logic that degrades into pluggable strategies** (§6 `Segmenter` protocol); the generic core defaults to "the whole frame is one unit."
+- A consumer writes one `YourType: MatchableRecord` adapter to plug in (primary field → primary, secondary fields → secondary).
 
-> 这个泛化让核心更简洁：核心只懂"带权字段的记录 + OCR 感知相似度 + 学习打分"，所有领域特异性都在适配层。
+> This generalization makes the core simpler: the core only understands "weighted-field records + OCR-aware similarity + learned scoring," and all domain specificity lives in the adapter layer.
 
-## 5. 总体架构
+## 5. Overall architecture
 
-两条流水线，外加一个共享枢纽（字形混淆表）。
+Two pipelines, plus one shared hub (the glyph-confusion table).
 
-### 5.1 运行时匹配流水线（端侧，每次扫描）
+### 5.1 Runtime matching pipeline (on-device, per scan)
 
 ```
-[OCR 文本 + bbox]            ← 消费方：Vision 或任意 OCR（核心引擎无关）
+[OCR text + bbox]            ← consumer: Vision or any OCR (engine-agnostic)
    │
    ▼  GlyphScanCore
-预处理：normalize / cleanForMatching / Segmenter 切单元 / 拆 primary·secondary 字段
+preprocess: normalize / cleanForMatching / Segmenter splits units / split primary·secondary fields
    │
-   ▼  Stage 1 · 粗筛召回
-生成滑窗子串（5 字 stride 1，3 字 / 前 4 字兜底）
-   │  └──▶ CandidateSource 协议 ──▶ 有界候选池 ≤ 300   ← 唯一可替换缝（消费方注入存储实现）
+   ▼  Stage 1 · coarse recall
+generate sliding-window substrings (5-char stride 1, 3-char / leading-4 fallback)
+   │  └──▶ CandidateSource protocol ──▶ bounded candidate pool ≤ 300   ← only pluggable seam (consumer injects storage)
    │
-   ▼  Stage 2 · 精排打分                                    ← ML
-对每个候选抽特征向量（OCR 感知 soft bigramRecall / twin-LCS / 数字重叠 / 长度比 + 旧公式分）
-   │  └──▶ LogisticScorer（加载 default-coefficients.json）──▶ 校准概率
+   ▼  Stage 2 · fine scoring                                  ← ML
+extract a feature vector per candidate (OCR-aware soft bigramRecall / twin-LCS / number overlap / length ratio + formula score)
+   │  └──▶ LogisticScorer (loads default-coefficients.json) ──▶ calibrated probability
    │
-   ▼  输出                                                  ← ML
-top-k(record, probability) + Confidence 四档（切点由数据学出）
+   ▼  output                                                  ← ML
+top-k(record, probability) + four-tier Confidence (cutoffs learned from data)
 ```
 
-### 5.2 离线训练流水线（开发 / CI，`swift run`，进 CI 不进发布产物）
+### 5.2 Offline training pipeline (dev / CI, `swift run`, into CI not into shipped artifact)
 
 ```
-[语料库（你的 Record）]
+[corpus (your Records)]
    │  GlyphScanLearn
-   ├─▶ 字形混淆表生成：CoreText 渲染每个字 → 比形状 → k-NN → cost∈[0,1]
-   │        │（同一张表也供运行时相似度使用，见 §8）
+   ├─▶ build glyph-confusion table: CoreText renders each char → compare shapes → k-NN → cost∈[0,1]
+   │        │ (the same table also feeds runtime similarity, see §8)
    ▼        ▼
-OCR 噪声生成（按混淆表 corrupt + 邻条串扰 + 难负样本挖掘）
+OCR noise generation (corrupt via the table + neighbor bleed + hard-negative mining)
    │
    ▼
-合成带标签集 (noisyScan, trueRecordID) 正负样本
+labeled synthetic set (noisyScan, trueRecordID), positive + negative
    │
    ▼
-LogisticTrainer（纯 Swift 梯度下降 + 温度标定）
+LogisticTrainer (pure-Swift gradient descent + temperature calibration)
    │
    ▼
-default-coefficients.json  ──系数注入──▶ LogisticScorer（运行时 Stage 2）
+default-coefficients.json  ──coefficients──▶ LogisticScorer (runtime Stage 2)
    │
    ▼
-Benchmark（top-1 / top-3 / AUC / ECE / 各档精度）── CI 质量闸门
+Benchmark (top-1 / top-3 / AUC / ECE / per-tier precision) ── CI quality gate
 ```
 
-### 5.3 共享枢纽：一张混淆表，三处用
+### 5.3 The shared hub: one table, three consumers
 
-| 消费方 | 用法 |
+| Consumer | Use |
 |---|---|
-| 运行时 · OCR 感知相似度 | soft bigram recall + twin-aware LCS：认错的形近字只扣一点，不再砍半 |
-| 训练 · 合成噪声 + 难负样本 | 按真实形近概率 corrupt；专挑"只差形近字"的记录当最难负样本 |
-| 评测 · 置信度标定 | twin 命中作为特征参与标定，四档切点更稳 |
+| Runtime · OCR-aware similarity | soft bigram recall + twin-aware LCS: a misread look-alike costs a little, no longer halves the run |
+| Training · synthetic noise + hard negatives | corrupt by real visual-confusion probability; mine records that "differ only by a look-alike" as the hardest negatives |
+| Eval · confidence calibration | twin hits as a feature in calibration; the four-tier cutoffs are steadier |
 
-## 6. 包结构与仓库布局
+## 6. Package structure and repository layout
 
 ```
 GlyphScan/
 ├── Package.swift
 ├── Sources/
-│   ├── GlyphScanCore/                  # 运行时核心，仅 Foundation
+│   ├── GlyphScanCore/                  # runtime core, Foundation only
 │   │   ├── Record.swift                # MatchableRecord / MatchField / FieldRole / RecordID
 │   │   ├── Normalize.swift             # normalize / cleanForMatching
-│   │   ├── Segmenter.swift             # Segmenter 协议 + WholeFrameSegmenter（默认）
-│   │   ├── GlyphConfusion.swift        # ConfusionTable（加载/查询，sparse）
-│   │   ├── Similarity.swift            # OCR 感知 softBigramRecall / twinLCS / pairSim
+│   │   ├── Segmenter.swift             # Segmenter protocol + WholeFrameSegmenter (default)
+│   │   ├── GlyphConfusion.swift        # ConfusionTable (load/query, sparse)
+│   │   ├── Similarity.swift            # OCR-aware softBigramRecall / twinLCS / pairSim
 │   │   ├── Features.swift              # (input, candidate) → FeatureVector
-│   │   ├── Scorer.swift                # Scorer 协议 + HeuristicScorer + LogisticScorer
-│   │   ├── CandidateSource.swift       # 协议 + ArrayCandidateSource（内存暴力版）
-│   │   ├── GlyphScanMatcher.swift      # 两阶段编排（滑窗生成在此）
-│   │   └── Confidence.swift            # 四档 tier（概率切，切点来自系数文件）
-│   ├── GlyphScanLearn/                 # 训练/评测工具，进 CI 不进发布产物
-│   │   ├── GlyphRenderer.swift         # CoreText 渲染字 → 归一化位图（#if canImport(CoreText)）
-│   │   ├── ConfusionBuilder.swift      # 位图 → k-NN → ConfusionTable 生成
-│   │   ├── OCRNoiseModel.swift         # 形近字替换 / 丢字 / 全半角 / 邻条串扰
-│   │   ├── SyntheticDataset.swift      # 语料 → (noisyScan, trueID) 带标签样本
-│   │   ├── LogisticTrainer.swift       # 梯度下降拟合 + 温度标定
-│   │   └── Metrics.swift               # top-1/top-3 / AUC / ECE / 各档精度
-│   └── glyphscan-cli/                  # 可执行：build-confusion / gen / train / bench
-├── Sources/GlyphScanVision/            # 可选 Apple-only：VNRecognizedText → [Observation]
+│   │   ├── Scorer.swift                # Scorer protocol + HeuristicScorer + LogisticScorer
+│   │   ├── CandidateSource.swift       # protocol + ArrayCandidateSource (brute-force in-memory)
+│   │   ├── GlyphScanMatcher.swift      # two-stage orchestration (window generation here)
+│   │   └── Confidence.swift            # four-tier (probability cutoffs from the coefficients file)
+│   ├── GlyphScanLearn/                 # training/eval tools, into CI not into shipped artifact
+│   │   ├── GlyphRenderer.swift         # CoreText renders a char → normalized bitmap (#if canImport(CoreText))
+│   │   ├── ConfusionBuilder.swift      # bitmap → k-NN → ConfusionTable
+│   │   ├── OCRNoiseModel.swift         # look-alike substitution / dropout / full-half-width / neighbor bleed
+│   │   ├── SyntheticDataset.swift      # corpus → (noisyScan, trueID) labeled samples
+│   │   ├── LogisticTrainer.swift       # gradient-descent fit + temperature calibration
+│   │   └── Metrics.swift               # top-1/top-3 / AUC / ECE / per-tier precision
+│   └── glyphscan-cli/                  # executable: build-confusion / gen / train / bench
+├── Sources/GlyphScanVision/            # optional, Apple-only: VNRecognizedText → [Observation]
 ├── Tests/
-│   ├── GlyphScanCoreTests/             # 相似度/特征/打分器/解耦端到端
-│   └── GlyphScanLearnTests/            # 混淆表断言（未/末是 twin、我/你不是）+ 噪声模型 + 训练收敛
+│   ├── GlyphScanCoreTests/             # similarity / features / scorer / decoupling end-to-end
+│   └── GlyphScanLearnTests/            # confusion assertions (未/末 are twins, 我/你 not) + noise model + training convergence
 ├── Resources/
-│   ├── default-coefficients.json       # 随包默认系数 + 各档切点（在样例库上训出）
-│   ├── default-confusions.json         # 默认形近字混淆表（样例库 charset + 常见 seed）
-│   └── sample-corpus.csv               # 小样例库（测试 + 开箱训练演示）
-├── Benchmarks/                         # 基准 fixtures + 期望指标阈值
+│   ├── default-coefficients.json       # bundled default coefficients + per-tier cutoffs (trained on the sample corpus)
+│   ├── default-confusions.json         # default look-alike confusion table (sample-corpus charset + common seed)
+│   └── sample-corpus.csv               # small sample corpus (tests + out-of-box training demo)
+├── Benchmarks/                         # benchmark fixtures + expected metric thresholds
 ├── README.md / docs/DESIGN.md
-└── LICENSE（MIT）
+└── LICENSE (MIT)
 ```
 
-要点：
-- `GlyphScanCore` **零第三方依赖**；逻辑回归推理 = 点积 + sigmoid，纯 Swift，不引 CoreML，可每帧对几百候选跑、成本可忽略。
-- `GlyphScanLearn` 用 CoreText 渲染字形——这正是把训练放在 Swift 而非 Python 的原因：渲染就在 Apple 平台手边，`swift run` 一条龙、零外部依赖。
-- 混淆表运行时只**加载**（sparse JSON），生成在离线。
+Key points:
+- `GlyphScanCore` has **zero third-party dependencies**; logistic-regression inference = dot product + sigmoid, pure Swift, no CoreML, cheap enough to run over hundreds of candidates per frame.
+- `GlyphScanLearn` renders glyphs with CoreText — exactly why training is in Swift, not Python: rendering is right there on Apple platforms, `swift run` end-to-end, zero external deps.
+- The confusion table is only **loaded** at runtime (sparse JSON); generation is offline.
 
-## 7. 数据模型与输出
+## 7. Data model and output
 
 ```swift
 public struct MatchResult {
     public let record: MatchableRecord
-    public let probability: Double          // LogisticScorer 输出的校准概率 [0,1]
+    public let probability: Double          // calibrated probability from LogisticScorer, [0,1]
     public let confidence: Confidence
 }
 
-public enum Confidence: Equatable {         // 切点来自系数文件，不再硬编码
+public enum Confidence: Equatable {         // cutoffs come from the coefficients file, no longer hard-coded
     case high, medium, low, veryLow
-    // 永远展示 top-1，用颜色/caveat 表达可信度
+    // always shows top-1; color/caveat conveys how much to trust it
 }
 ```
 
-## 8. 字形混淆模型（核心巧思）
+## 8. Glyph-confusion model (the core idea)
 
-### 8.1 生成（离线，`GlyphScanLearn` / `glyphscan-cli build-confusion`）
+### 8.1 Generation (offline, `GlyphScanLearn` / `glyphscan-cli build-confusion`)
 
-1. **确定 charset**：语料库出现过的全部字符 ∪ 可选常见形近 seed 集。典型语料几千个 distinct 字，可行。
-2. **渲染**：用 CoreText 把每个字渲染成 N×N（默认 32×32）灰度位图，居中、按墨迹归一化（消除字面大小差异）。
-3. **特征**：归一化位图展平为向量（默认 32×32=1024 维；可选降采样到 16×16）。
-4. **近邻**：对每个字求视觉最近邻。朴素 O(n²) 在几千字规模秒级可接受；更大 charset 用墨迹密度 / 包围盒纵横比分桶剪枝，只在邻桶内比较。
-5. **距离 → cost**：`cost = clamp(1 - cosine(a,b), 0, 1)`；每字只保留 top-k（默认 8）、且 `cost ≤ τ`（默认 0.35）的近邻。
-6. **输出** sparse 表：`char → [(neighbor, cost)]`，写 `default-confusions.json`。
+1. **Determine the charset**: all characters present in the corpus ∪ an optional common-look-alike seed set. A typical corpus has a few thousand distinct characters — tractable.
+2. **Render**: CoreText renders each char to an N×N (default 32×32) grayscale bitmap, centered and ink-normalized (so glyph size differences are removed).
+3. **Features**: flatten the normalized bitmap to a vector (default 32×32=1024 dims; optionally downsampled to 16×16).
+4. **Neighbors**: find each char's visual nearest neighbors. Naive O(n²) is sub-second at a few thousand chars; for larger charsets, bucket-prune by ink density / bounding-box aspect ratio and compare only within adjacent buckets.
+5. **Distance → cost**: `cost = clamp(1 - cosine(a,b), 0, 1)`; keep only each char's top-k (default 8) neighbors with `cost ≤ τ` (default 0.35).
+6. **Output** a sparse table: `char → [(neighbor, cost)]`, written to `default-confusions.json`.
 
-确定性：固定字体、字号、渲染参数 → 构建可复现（CI 可校验哈希）。
+Determinism: fixed font, size, and render params → reproducible builds (CI can verify a hash).
 
-可选 **on-device 重生成**：用当前 UI 字体在端侧跑同一流程，得到与本机渲染一致的混淆表（"它看的是你这台机器上的字形"）。默认仍发预生成表，端侧重生成为 opt-in。
+Optional **on-device regeneration**: run the same pipeline on-device with the current UI font, producing a confusion table consistent with this machine's rendering ("it looks at the glyphs on *your* device"). The prebuilt table still ships by default; on-device regeneration is opt-in.
 
-### 8.2 校验（一个会让人会心一笑的单测）
+### 8.2 Validation (a unit test that should make you smile)
 
 ```
 assert twin(未, 末) && twin(已, 己) && twin(田, 由) && twin(干, 千)
 assert !twin(我, 你) && !twin(山, 海)
 ```
 
-把"它真的懂形近字"变成 CI 里跑的断言，而非 README 里的吹嘘。
+Turn "it really understands look-alikes" into an assertion that runs in CI, not a boast in the README.
 
-### 8.3 数字例外（重要纠偏）
+### 8.3 The digit exception (an important correction)
 
-形近软化**只用于 CJK 与字母，不用于数字**。3 与 8 即便不形近，它们的**值**也必须精确区分——把数字的认错软化掉会让 "3/4" 与 "8/4" 误判为同条。因此：
-- 相似度里数字按**精确**匹配。
-- false-twin 数字守卫（候选独有 ≥2 个数字 ∧ 占比 ≥50% 才罚分）保留，作为离散特征喂给学习器（§9）。
+Look-alike softening applies **only to CJK and letters, not to digits**. Even though 3 and 8 aren't look-alikes, their **values** must be matched exactly — softening a digit misread would make "3/4" and "8/4" collide as the same record. Therefore:
+- Digits are matched **exactly** in similarity.
+- The false-twin digit guard (penalize only when the candidate has ≥2 numbers the input doesn't and they make up ≥50%) is kept and fed to the learner as a discrete feature (§9).
 
-## 9. OCR 感知相似度
+## 9. OCR-aware similarity
 
-定义 `twinCost(a,b)`：`a==b → 0`；`(a,b)` 在表中 → 表 cost；否则 → 1（数字之间恒为精确，见 §8.3）。
+Define `twinCost(a,b)`: `a==b → 0`; `(a,b)` in the table → its cost; otherwise → 1 (digits are always exact, see §8.3).
 
-- **soft bigram recall**：把输入的每个 bigram 连同其形近变体（带 `1-cost` 权重）展开进一个加权多重映射；对候选的每个 bigram 取最佳命中权重之和 ÷ |候选 bigram|。展开受 k² 上界（k≈8 → ≤64）约束，仍廉价。精确逐字命中 → 1.0；全靠形近命中 → ≈∏(1-cost)。
-- **twin-aware LCS**：连续子串 DP，匹配条件放宽为 `twinCost ≤ τ`，累积 `1-cost` 而非整数 1。一个被认错的形近字不再把连续段拦腰砍断——直接打中 §2 的头号失效。
-- **合成**：`pairSim = 0.65·softBigramRecall + 0.35·softLcsRatio`（这俩权重最终也作为特征交给学习器，不再是定死的魔数）。
-- primary/secondary 字段分别算 `pairSim` 再加权（默认 0.4/0.6）。
+- **soft bigram recall**: expand each input bigram, together with its look-alike variants (weighted `1-cost`), into a weighted multimap; for each candidate bigram take the best matching weight, summed ÷ |candidate bigrams|. Expansion is bounded by k² (k≈8 → ≤64), still cheap. A verbatim char-for-char hit → 1.0; an all-look-alike hit → ≈∏(1-cost).
+- **twin-aware LCS**: contiguous-substring DP with the match condition relaxed to `twinCost ≤ τ`, accumulating `1-cost` rather than integer 1. A single misread look-alike no longer cuts the contiguous run in half — hitting the §2 #1 failure mode directly.
+- **combine**: `pairSim = 0.65·softBigramRecall + 0.35·softLcsRatio` (these two weights are also ultimately handed to the learner as features, no longer fixed magic numbers).
+- primary/secondary fields each compute `pairSim`, then weighted (default 0.4/0.6).
 
-### 9.1 学习型标定打分器（取代全部手调魔数）
+### 9.1 The learned, calibrated scorer (replacing all hand-tuned magic numbers)
 
-**特征向量**，每个 `(input, candidate)` 一条（全部复用上面已算的量，无新增重活）：
+**Feature vector**, one per `(input, candidate)` (all reuse quantities already computed above, no new heavy work):
 
-| 特征 | 含义 |
+| Feature | Meaning |
 |---|---|
-| `softBigramRecall_primary` | primary 字段 OCR 感知 bigram 召回 |
-| `softLcsRatio_primary` | primary 字段 twin-aware LCS ÷ 长度 |
-| `softBigramRecall_secondary` / `softLcsRatio_secondary` | secondary 字段同上 |
-| `numberOverlap` | 抽取数字的 Jaccard（精确，见 §8.3） |
-| `falseTwinFired` | 数字守卫是否触发（离散 0/1） |
-| `lengthRatio` | `log(cleaned候选 ÷ cleaned输入)` |
-| `hasSecondary` | 候选是否有 secondary 字段 |
-| `inputLen` | 输入长度（区分整页扫描 vs 单条截图） |
-| `heuristicScore` | **现有 OCR 感知公式 blended 分（作为一个特征）** |
+| `softBigramRecall_primary` | OCR-aware bigram recall on the primary field |
+| `softLcsRatio_primary` | twin-aware LCS ÷ length on the primary field |
+| `softBigramRecall_secondary` / `softLcsRatio_secondary` | same, for the secondary field |
+| `numberOverlap` | Jaccard of extracted numbers (exact, see §8.3) |
+| `falseTwinFired` | whether the digit guard fired (discrete 0/1) |
+| `lengthRatio` | `log(cleaned candidate ÷ cleaned input)` |
+| `hasSecondary` | whether the candidate has a secondary field |
+| `inputLen` | input length (distinguishes full-page scan vs single-record screenshot) |
+| `heuristicScore` | **the current OCR-aware blended formula score (as a feature)** |
 
-**模型：逻辑回归** → `p(候选就是正确记录 | 特征)`。
-- **排序** = 按 `p` 排。
-- **置信度** = 对 top-1 的 `p` 切档；切点按"每档目标精度"在留出集上学出（如 high = 精度 ≥ 0.95 处的 p），写进系数文件，取代硬编码切点。
-- **标定**：逻辑回归本身较好标定，再在留出集上做一次温度缩放（Platt），用 ECE / 可靠性图验收。
+**Model: logistic regression** → `p(candidate is the correct record | features)`.
+- **Ranking** = sort by `p`.
+- **Confidence** = bin the top-1 `p`; cutoffs are learned per "target precision per tier" on a held-out set (e.g. high = the `p` where precision ≥ 0.95), written into the coefficients file, replacing hard-coded cutoffs.
+- **Calibration**: logistic regression is fairly well-calibrated already; add one temperature scaling (Platt) on a held-out set, validated with ECE / a reliability diagram.
 
-**关键决策：把 `heuristicScore` 也喂进去** → 学习器是手调公式的**严格超集**。最差等于公式（下限锁死、永不更差），又能在公式之上再榨准确率。默认值风险最低。
+**Key decision: feed `heuristicScore` in too** → the learner is a **strict superset** of the hand-tuned formula. At worst it equals the formula (lower bound locked, never worse), and it can squeeze out extra accuracy on top. Lowest-risk default.
 
-**为什么逻辑回归而非 GBT/NN**：约 10 个系数，JSON 几行；纯 Swift 推理在热路径零负担；系数可解释；小数据也稳；**无模型时回退 `HeuristicScorer`**，默认永不崩。
+**Why logistic regression, not GBT/NN**: ~10 coefficients, a few lines of JSON; pure-Swift inference with zero overhead on the hot path; interpretable coefficients; stable with little data; **falls back to `HeuristicScorer` when no model is present**, so the default never breaks.
 
 ```swift
 public protocol Scorer {
-    func score(input: String, candidate: MatchableRecord) -> Double   // OCR 文本 vs 候选 → 可比较分
+    func score(input: String, candidate: MatchableRecord) -> Double   // OCR text vs candidate → comparable score
     func confidence(forTopScore p: Double) -> Confidence
 }
-// HeuristicScorer：现 OCR 感知公式 + 旧式切点（兜底 / A-B 基线）
-// LogisticScorer：加载系数 → 特征点积 + sigmoid + 学出来的切点
+// HeuristicScorer: the current OCR-aware formula + legacy cutoffs (fallback / A-B baseline)
+// LogisticScorer:  load coefficients → feature dot product + sigmoid + learned cutoffs
 ```
 
-`GlyphScanMatcher` 持有一个 `Scorer`，默认 `.bundledLearned`，可切 `.heuristic` / `.custom(coeffs)`。
+`GlyphScanMatcher` holds a `Scorer`, defaulting to `.bundledLearned`, switchable to `.heuristic` / `.custom(coeffs)`.
 
-## 10. 两阶段匹配器 + CandidateSource 解耦
+## 10. Two-stage matcher + CandidateSource decoupling
 
 ```swift
 public protocol CandidateSource {
-    /// 给定核心生成的滑窗子串，返回 primary 字段可能包含它们的有界候选池。
+    /// Given the core's sliding-window substrings, return a bounded pool of
+    /// records whose primary field may contain any of them.
     func candidates(matchingAnyOf windows: [String], limit: Int) -> [MatchableRecord]
 }
 ```
 
-- 滑窗策略（5 字 / stride 1 / 3 字兜底 / 前 4 字兜底 / 池上限 300 / 长度比 [0.3,3.0] 过滤）留在核心 `GlyphScanMatcher`；它只把"要查的窗口"交给 source；"按窗口取行"是唯一可替换点。
-- 包内自带 `ArrayCandidateSource`（内存子串扫描，适合小库 + 测试 + 开箱即用）。
-- 大库消费方提供 SQLite/GRDB 版 `CandidateSource`，把滑窗 `LIKE` SQL 包进去即可。
+- The window strategy (5-char / stride 1 / 3-char fallback / leading-4 fallback / pool cap 300 / length ratio [0.3,3.0] filter) stays in the core `GlyphScanMatcher`; it only hands the source "the windows to query"; "fetch rows by window" is the only replaceable point.
+- The package ships `ArrayCandidateSource` (in-memory substring scan — good for small corpora, tests, and getting started).
+- A large-corpus consumer provides a SQLite/GRDB-backed `CandidateSource` wrapping a sliding-window `LIKE` query.
 
-## 11. 合成数据 + 纯 Swift 训练
+## 11. Synthetic data + pure-Swift training
 
-- **OCRNoiseModel**：字符级（查混淆表的形近替换、丢字、插杂字、全/半角互换）+ 版面级（次字段乱序、尾部截断、页眉页脚杂串、编号前缀多形态）+ **邻条串扰**（拼接相邻记录文本模拟"整页"场景）。
-- **难负样本挖掘**：用混淆表找出"只差形近字/数字"的记录对，专门生成最难负样本，逼模型学会精细区分。
-- **SyntheticDataset**：自动标注（已知来源 id），产出正负样本，零人工。
-- **LogisticTrainer**：纯 Swift batch/mini-batch 梯度下降（~10 特征 × 几千样本，几十行即可），含 L2 正则与温度标定。
-- **CLI**：`build-confusion`（建混淆表）、`gen`（生成合成集）、`train`（拟合 → 写系数）、`bench`（出指标）。
-- **Metrics**：top-1 准确率、top-3 召回、AUC、ECE、各档精度。
+- **OCRNoiseModel**: character-level (table-driven look-alike substitution, dropout, junk insertion, full/half-width swaps) + layout-level (secondary-field shuffle, trailing truncation, header/footer junk, multi-form numbering prefixes) + **neighbor bleed** (concatenate adjacent records' text to simulate the "whole page" case).
+- **Hard-negative mining**: use the confusion table to find record pairs that "differ only by a look-alike / a number," and generate the hardest negatives, forcing the model to learn fine distinctions.
+- **SyntheticDataset**: auto-labeled (the source id is known), producing positive + negative samples, zero manual work.
+- **LogisticTrainer**: pure-Swift batch/mini-batch gradient descent (~10 features × a few thousand samples, a few dozen lines), with L2 regularization and temperature calibration.
+- **CLI**: `build-confusion` (build the table), `gen` (generate the synthetic set), `train` (fit → write coefficients), `bench` (report metrics).
+- **Metrics**: top-1 accuracy, top-3 recall, AUC, ECE, per-tier precision.
 
-## 12. 可选端侧反馈回路（二期）
+## 12. Optional on-device feedback loop (phase 2)
 
-- 库暴露钩子：消费方在用户**采纳/否决/纠正**某条结果时，回吐 `(featureVector, label)`；存储由消费方掌握（全本地）。
-- 一期只做采集 + 离线重训；二期再考虑端侧用同一个 Swift LR 增量微调（合成先验 + 真实反馈混合）。隐私：全本地、可选开启、无网络。
+- The library exposes a hook: when the user **accepts/rejects/corrects** a result, it emits `(featureVector, label)`; storage is the consumer's (fully local).
+- Phase 1 only does collection + offline retraining; phase 2 considers on-device incremental fine-tuning with the same Swift LR (synthetic prior + real feedback blended). Privacy: fully local, opt-in, no network.
 
-## 13. 公开 API（消费者视角）
+## 13. Public API (consumer's view)
 
 ```swift
 let matcher = GlyphScanMatcher(
-    source: myCandidateSource,        // 或内置 ArrayCandidateSource(records)
-    scorer: .bundledLearned           // 或 .heuristic / .custom(coeffs)
+    source: myCandidateSource,        // or the built-in ArrayCandidateSource(records)
+    scorer: .bundledLearned           // or .heuristic / .custom(coeffs)
 )
 
-// 一次性（文本框 / 单帧 OCR 文本）：
+// one-shot (text box / single OCR frame):
 let hits = matcher.bestMatches(for: ocrText, limit: 3)
 // hits: [MatchResult]  —— record + probability + confidence
 
-// 纯工具也都 public：normalize / segment / pairSim / ConfusionTable.query ……
+// the pure utilities are public too: normalize / segment / pairSim / ConfusionTable.query …
 ```
 
-## 14. 测试与质量闸门
+## 14. Testing and quality gates
 
-- 混淆表断言（§8.2）。
-- **CI 基准闸门**：合成基准必须达到 top-1 ≥ X% / top-3 ≥ Y% / ECE ≤ Z，回归即 fail build——对匹配库这是防止悄悄变差的命根子。（X/Y/Z 在首版基准跑通后定基线。）
-- **不劣于公式**测试：`LogisticScorer` 在基准上必须 ≥ `HeuristicScorer`，保证永不发更差的默认值。
-- OCR 感知 vs 精确相似度的消融测试：证明 twin 软化在含形近噪声的集上确有增益。
+- Confusion-table assertions (§8.2).
+- **CI benchmark gate**: the synthetic benchmark must hit top-1 ≥ X% / top-3 ≥ Y% / ECE ≤ Z; a regression fails the build — for a matching library this is the lifeline against silently getting worse. (X/Y/Z are baselined after the first benchmark runs.)
+- **No-worse-than-formula** test: `LogisticScorer` must be ≥ `HeuristicScorer` on the benchmark, guaranteeing we never ship a worse default.
+- An OCR-aware vs exact similarity ablation: prove twin softening genuinely helps on a set with look-alike noise.
 
-## 15. 接入 GlyphScan（采用指南）
+## 15. Adopting GlyphScan (integration guide)
 
-- 给你的记录类型实现 `MatchableRecord`（主字段→primary、次字段→secondary）。
-- 实现 `CandidateSource`：小库用内置 `ArrayCandidateSource`；大库用 SQLite/GRDB 包一层滑窗 `LIKE`。
-- 选 `Scorer`：默认 `.bundledLearned`；想要确定性基线用 `.heuristic`；用自己语料重训得 `.custom(coeffs)`。
-- 流式/相机场景：消费 `MatchResult.record.id` 做跨帧身份判断（流式追踪器作为未来可选模块 `GlyphScanStream`）。
+- Implement `MatchableRecord` on your record type (primary field → primary, secondary fields → secondary).
+- Implement `CandidateSource`: small corpus → built-in `ArrayCandidateSource`; large corpus → SQLite/GRDB wrapping a sliding-window `LIKE`.
+- Pick a `Scorer`: default `.bundledLearned`; want a deterministic baseline → `.heuristic`; retrain on your own corpus → `.custom(coeffs)`.
+- Streaming / camera scenario: consume `MatchResult.record.id` for cross-frame identity (the streaming tracker is the future optional module `GlyphScanStream`).
 
-## 16. 分期实施
+## 16. Phased implementation
 
-1. **P0 打平**：`GlyphScanCore` 通用 Record + `CandidateSource` 解耦 + 公式版相似度/测试（`HeuristicScorer`）。以 `HeuristicScorer` 打平作为基线。
-2. **P1 字形混淆 + OCR 感知相似度**：`GlyphRenderer` / `ConfusionBuilder` / soft 相似度 + 混淆表断言 + 消融。
-3. **P2 学习型标定打分器**：特征 + `LogisticTrainer` + 合成数据 + 基准闸门 + `default-coefficients.json`。
-4. **P3 打磨开源**：英文 README、`GlyphScanVision` 可选 target、`sample-corpus`、CI、LICENSE。
-5. **（未来）** 端侧反馈在线学习、`GlyphScanStream`（流式追踪器）、网页 playground。
+1. **P0 baseline**: `GlyphScanCore` generic Record + `CandidateSource` decoupling + formula-based similarity/tests (`HeuristicScorer`). Baseline at parity with `HeuristicScorer`.
+2. **P1 glyph confusion + OCR-aware similarity**: `GlyphRenderer` / `ConfusionBuilder` / soft similarity + confusion assertions + ablation.
+3. **P2 learned calibrated scorer**: features + `LogisticTrainer` + synthetic data + benchmark gate + `default-coefficients.json`.
+4. **P3 open-source polish**: English README, optional `GlyphScanVision` target, `sample-corpus`, CI, LICENSE.
+5. **(future)** on-device feedback online learning, `GlyphScanStream` (streaming tracker), web playground.
 
-## 17. 风险与权衡
+## 17. Risks and trade-offs
 
-| 风险 | 缓解 |
+| Risk | Mitigation |
 |---|---|
-| 混淆表生成 O(n²) 在大 charset 爆炸 | charset 限定到语料 + seed；分桶剪枝；离线一次性 |
-| 形近软化误伤（把真不同的记录拉近） | 数字精确不软化；τ / k 保守；公式分作特征锁死下限；消融验收 |
-| 合成噪声与真机 OCR 分布有 gap | 噪声模型直接由真实字形混淆驱动；二期用端侧真实反馈校正 |
-| 学习器过拟合小样例库 | L2 正则；公式分超集兜底；消费方可用自己语料重训 |
-| CoreText 仅 Apple 平台 | 训练工具 `#if canImport(CoreText)`；预生成表随包发，非 Apple 平台仍可加载使用 |
+| Confusion-table O(n²) generation explodes on a large charset | limit the charset to corpus + seed; bucket-prune; one-time offline |
+| Look-alike softening over-pulls (drags genuinely different records together) | digits exact, never softened; conservative τ / k; formula score as a feature locks the lower bound; ablation validation |
+| Synthetic noise differs in distribution from real-device OCR | the noise model is driven directly by real glyph confusion; phase 2 corrects with on-device real feedback |
+| The learner overfits the small sample corpus | L2 regularization; formula-superset fallback; consumers can retrain on their own corpus |
+| CoreText is Apple-only | training tools `#if canImport(CoreText)`; the prebuilt table ships with the package, so non-Apple platforms can still load and use it |
 
-## 18. 仓库元信息
+## 18. Repository metadata
 
-- **名称**：GlyphScan（突出"看字形"的核心巧思，通用、不绑领域）。
-- **License**：MIT。
-- **文档语言**：公开 README 英文；中文设计文档放 `docs/`。
+- **Name**: GlyphScan (highlights the "look at glyphs" core idea; generic, not bound to a domain).
+- **License**: MIT.
+- **Doc language**: README and design doc are provided in both Chinese and English.
 
-## 19. 待解决 / 首版需定基线
-- §14 基准阈值 X/Y/Z 待首版基准跑通后写死。
-- 混淆表 N（位图分辨率）、k、τ 的默认值待小规模实验定档（初值 32 / 8 / 0.35）。
+## 19. Open issues / to baseline in the first version
+- §14 benchmark thresholds X/Y/Z to be fixed after the first benchmark runs.
+- The confusion table's N (bitmap resolution), k, and τ defaults to be settled by small-scale experiments (initial values 32 / 8 / 0.35).

@@ -1,5 +1,7 @@
 # GlyphScan
 
+**English** | [中文](README.zh-CN.md)
+
 **On-device, OCR-aware fuzzy matching that finds the one record your camera is pointed at — inside a haystack of noisy OCR text.**
 
 Pure Swift, zero runtime dependencies. GlyphScan understands *how CJK OCR actually fails* — because it has looked at the glyphs.
